@@ -4,6 +4,7 @@ import time
 import math
 import struct
 from tank_motor import tankMotor
+from servo import Servo
 from enum import Enum
 from collections import deque
 import socket
@@ -1397,8 +1398,12 @@ def control_loop():
     held = set()
     enabled = False
     lock = threading.Lock()
-    motors = tankMotor()
-    speed = 1500  # Initial test speed; maximum is 4095
+
+    speed = 1500
+    lift_channel = "0"
+    claw_channel = "1"
+    lift_angle = 90
+    claw_angle = 140
 
     arrows = {
         keyboard.Key.up,
@@ -1411,7 +1416,6 @@ def control_loop():
         nonlocal enabled
 
         with lock:
-            # Ignore repeated keypresses while a key is held
             if key in held:
                 return
 
@@ -1423,7 +1427,10 @@ def control_loop():
                     "control ENABLED" if enabled else "control DISABLED",
                     flush=True,
                 )
-            elif key in arrows:
+            elif (
+                key in arrows
+                or getattr(key, "char", None) in ("w", "s", "a", "d")
+            ):
                 held.add(key)
 
     def on_release(key):
@@ -1435,10 +1442,18 @@ def control_loop():
         on_release=on_release,
     )
 
-    print("Press SPACE to enable, then hold arrow keys.", flush=True)
-    last_output = None
+    motors = tankMotor()
 
     try:
+        gripper = Servo()
+
+        print(
+            "SPACE: enable/disable | Arrows: drive | "
+            "W/S: lift | A/D: claw",
+            flush=True,
+        )
+
+        last_output = None
         listener.start()
 
         while running:
@@ -1448,6 +1463,7 @@ def control_loop():
             with lock:
                 active = held.copy() if enabled else set()
 
+            # Drive motors
             forward = (
                 int(keyboard.Key.up in active)
                 - int(keyboard.Key.down in active)
@@ -1459,18 +1475,40 @@ def control_loop():
 
             left = forward + turn
             right = forward - turn
-
-            # Keep combined forward/turn commands within the speed limit
             scale = max(1, abs(left), abs(right))
+
             left_duty = int(speed * left / scale)
             right_duty = int(speed * right / scale)
 
             motors.setMotorModel(left_duty, right_duty)
 
-            output = (left_duty, right_duty)
+            # Servo controls
+            letters = {
+                key.char for key in active
+                if isinstance(key, keyboard.KeyCode) and key.char
+            }
+
+            lift_step = int("w" in letters) - int("s" in letters)
+            if lift_step:
+                lift_angle = max(
+                    90, min(150, lift_angle + lift_step)
+                )
+                gripper.setServoAngle(lift_channel, lift_angle)
+
+            claw_step = int("a" in letters) - int("d" in letters)
+            if claw_step:
+                claw_angle = max(
+                    90, min(150, claw_angle + claw_step)
+                )
+                gripper.setServoAngle(claw_channel, claw_angle)
+
+            output = (
+                left_duty, right_duty, lift_angle, claw_angle
+            )
             if output != last_output:
                 print(
-                    f"Left: {left_duty}, Right: {right_duty}",
+                    f"Left: {left_duty}, Right: {right_duty}, "
+                    f"Lift: {lift_angle}, Claw: {claw_angle}",
                     flush=True,
                 )
                 last_output = output
@@ -1483,7 +1521,6 @@ def control_loop():
         finally:
             listener.stop()
             motors.close()
-
 # --------------------------------------------------
 # Start Threads
 # --------------------------------------------------
